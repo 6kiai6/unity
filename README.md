@@ -4,41 +4,52 @@
 
 ```
 Assets/Scripts/
-├── Base/                    # 基类与框架
-│   ├── SingleMonoBase.cs    # 单例 MonoBehaviour 基类
-│   ├── StateBase.cs         # 状态机状态基类
-│   ├── PlayerStateBase.cs   # 玩家状态基类
-│   ├── EnemyStateBase.cs    # 敌人状态基类
-│   └── EnemyBase.cs         # 敌人基类
+├── Base/                       # 基类与框架
+│   ├── SingleMonoBase.cs       # 单例 MonoBehaviour 基类
+│   ├── StateBase.cs            # 状态机状态基类
+│   ├── PlayerStateBase.cs      # 玩家状态基类
+│   ├── EnemyStateBase.cs       # 敌人状态基类
+│   ├── EnemyBase.cs            # 敌人基类
+│   ├── PoolBase.cs             # 泛型对象池基类（Stack + inactiveRoot）
+│   ├── ObjPoolsBase.cs         # 通用 GameObject 多预制体池 + ObjPoolBase<T> 壳
+│   └── EventCenterBase.cs      # 泛型事件中心（string + UnityAction<T>）
 ├── Utils/
-│   └── StateMachine.cs      # 通用状态机
-├── Manager/                 # 管理器（单例）
-│   ├── GameManger.cs        # 游戏管理器（玩家模型列表）
-│   ├── MonoManager.cs       # 统一 Update 派发
-│   ├── UIManager.cs         # UI（世界空间画布）
-│   ├── GamePoolManager.cs   # （未使用）
-│   └── ObjPoolManager.cs    # 对象池（已注释）
-├── Player/                  # 玩家
-│   ├── PlayerController.cs  # 输入、相机、切换角色
-│   ├── PlayerModel.cs       # 角色模型 + 状态机
-│   ├── PlayerWeapon.cs      # 武器发射
-│   ├── PlayerWeaponBullet.cs# 子弹逻辑与碰撞
-│   └── State/               # 玩家状态
+│   └── StateMachine.cs         # 通用状态机
+├── Manager/
+│   ├── GameManger.cs           # 游戏管理器（玩家模型列表）
+│   ├── MonoManager.cs          # 统一 Update 派发
+│   ├── UIManager.cs            # UI（世界空间画布）
+│   ├── GamePoolManager.cs      # 空壳（待扩展）
+│   └── ObjPoolManager.cs       # 整段注释（旧版对象池实现）
+├── Other/
+│   ├── BulletPool.cs           # BulletPools / BulletPool / BulletEvent（子弹池与事件类占位）
+│   ├── EnemyPool.cs            # 敌人对象池 EnemyPool : PoolBase<EnemyPool, ZombieEnemy>
+│   └── Enemymanger.cs          # 触发器内定时从 EnemyPool 取僵尸（拼写为 manger）
+├── Factory/
+│   ├── IFactory.cs             # 工厂接口 Create()
+│   ├── FactorySO.cs            # ScriptableObject 工厂基类
+│   ├── SphereFactor.cs         # 示例：CreateAssetMenu 创建 Sphere
+│   └── Sphere.cs               # 示例产品（空脚本）
+├── Player/
+│   ├── PlayerController.cs     # 输入、相机、切换角色
+│   ├── PlayerModel.cs          # 角色模型 + 状态机
+│   ├── PlayerWeapon.cs         # 武器发射（当前仍为 Instantiate）
+│   ├── PlayerWeaponBullet.cs   # 子弹逻辑与碰撞
+│   └── State/
 │       ├── PlayerIdelState.cs
 │       ├── PlayerMoveState.cs
 │       ├── PlayerHoverState.cs
 │       └── PlayerAmingState.cs
 ├── Enemy/
-│   ├── ZombieEnemy.cs       # 僵尸敌人
+│   ├── ZombieEnemy.cs
+│   ├── Spherekk.cs             # 占位（可与子弹 Tag 交互扩展）
 │   └── ZombieState/
 │       ├── ZombieIdleState.cs
 │       ├── ZombieMoveState.cs
 │       ├── ZombieAttackState.cs
 │       └── ZombieDeadState.cs
-├── UI/
-│   └── EnemyHealthBarUI.cs # 敌人血条
-└── Settings/
-    └── MyInputSystem.cs     # 新输入系统（自动生成）
+└── UI/
+    └── EnemyHealthBarUI.cs
 ```
 
 ---
@@ -48,23 +59,25 @@ Assets/Scripts/
 ```
 游戏启动
     │
-    ├─► SingleMonoBase 单例初始化（GameManager, PlayerController, MonoManager, UIManager）
+    ├─► SingleMonoBase 单例初始化
+    │       PlayerController / GameManager / MonoManager / UIManager
+    │       PoolBase 派生类：BulletPools、EnemyPool（若场景挂载且先于访问初始化）
+    │       EventCenterBase 派生：BulletEvent（若使用）
+    │       ObjPoolsBase（若场景挂载）
     │
-    ├─► PlayerController.Awake：创建 MyInputSystem
-    ├─► PlayerModel.Awake：创建 StateMachine，获取 Animator / CharacterController / NavMeshAgent
-    ├─► EnemyBase.Awake：创建 StateMachine，获取 NavMeshAgent，初始化血量等
+    ├─► PlayerModel / EnemyBase：Awake 内创建 StateMachine，组件引用就绪
     │
-    ├─► PlayerController.Start：
-    │       currentPlayerModel.Enter()（禁用 NavMeshAgent）
-    │       ResetCameraTarget()、ExitAim()
-    │
+    ├─► PlayerController.Start：当前角色 Enter()、相机绑定、ExitAim()
     ├─► PlayerModel.Start：SwitchState(Idle)、ExitAim()
     ├─► EnemyBase.Start：SwitchState(Idle)、FindAttackTarget()、生成血条
     │
-    └─► 每帧 Update：
-            PlayerController：读输入 → 计算 worldMovement/localMovement → 可选切换角色(1/2)
-            MonoManager：执行所有通过 AddUpdateAction 注册的委托
-                → 当前玩家/敌人状态的 Update 被调用
+    ├─► Enemymanger（可选）：玩家 Tag 停留在触发器内时，按间隔调用
+    │       EnemyPool.Instance.GetObj(enemyPrefab) 生成僵尸，并累计 enemyCount
+    │
+    └─► 每帧
+            PlayerController：读输入 → worldMovement / localMovement → 角色切换
+            MonoManager：Invoke 已注册的各状态 Update
+            EnemyBase：血条显示计时（未死亡时）
 ```
 
 ---
