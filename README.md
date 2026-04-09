@@ -1,5 +1,9 @@
 # 项目代码总览与流程说明
 
+Unity **6000.3.10f1**（见 `ProjectSettings/ProjectVersion.txt`），URP + Input System + Cinemachine。下文与 `Assets/Scripts` 下 **61** 个 C# 脚本一致。
+
+---
+
 ## 一、项目结构概览
 
 ```
@@ -9,7 +13,7 @@ Assets/Scripts/
 │   ├── StateBase.cs            # 状态机状态基类
 │   ├── PlayerStateBase.cs      # 玩家状态基类
 │   ├── EnemyStateBase.cs       # 敌人状态基类
-│   ├── EnemyBase.cs            # 敌人基类
+│   ├── EnemyBase.cs            # 敌人基类（含 questEnemyTypeId、死亡时派发 EnemyKilled）
 │   ├── PoolBase.cs             # 泛型对象池基类（Stack + inactiveRoot）
 │   ├── ObjPoolsBase.cs         # 通用 GameObject 多预制体池 + ObjPoolBase<T> 壳
 │   └── EventCenterBase.cs      # 泛型事件中心（string + UnityAction<T>）
@@ -33,8 +37,8 @@ Assets/Scripts/
 ├── Player/
 │   ├── PlayerController.cs     # 输入、相机、切换角色
 │   ├── PlayerModel.cs          # 角色模型 + 状态机
-│   ├── PlayerWeapon.cs         # 武器发射（当前仍为 Instantiate）
-│   ├── PlayerWeaponBullet.cs   # 子弹逻辑与碰撞
+│   ├── PlayerWeapon.cs         # 武器发射；装饰者管道 + 可选 WeaponBuffTable 药水
+│   ├── PlayerWeaponBullet.cs   # 子弹逻辑与碰撞；ApplyWeaponStats 写入最终伤害/初速
 │   └── State/
 │       ├── PlayerIdelState.cs
 │       ├── PlayerMoveState.cs
@@ -42,15 +46,47 @@ Assets/Scripts/
 │       └── PlayerAmingState.cs
 ├── Enemy/
 │   ├── ZombieEnemy.cs
-│   ├── Spherekk.cs             # 占位（可与子弹 Tag 交互扩展）
+│   ├── Spherekk.cs             # 可与子弹等玩法扩展
 │   └── ZombieState/
 │       ├── ZombieIdleState.cs
 │       ├── ZombieMoveState.cs
 │       ├── ZombieAttackState.cs
-│       └── ZombieDeadState.cs
-└── UI/
-    └── EnemyHealthBarUI.cs
+│       └── ZombieDeadState.cs  # 动画结束后 EnemyPool.ReleaseObj（回池）
+├── UI/
+│   ├── BasePanel.cs            # 面板基类；Close 时从 UISettings.panelDict 移除并 Destroy
+│   ├── UISettings.cs           # 单例；pathDict + OpenPanel/ClosePanel（Resources/Prefab/Panel/...）
+│   └── EnemyHealthBarUI.cs     # 世界空间血条
+├── Package/                    # 背包：静态表 + 本地存档 + 运行时入口
+│   ├── PackageTable.cs         # ScriptableObject 物品定义列表
+│   ├── PackageLocalData.cs     # PlayerPrefs 持久化 PackageLocalItem
+│   └── PackageManager.cs       # TryAddItem / TryRemoveItem、OnInventoryChanged
+├── Dialogue/                   # 对话
+│   ├── DialogueData.cs         # DialogueNode / Choice / DialogueItemGrant
+│   ├── DialogueSystem.cs       # 流程控制；可选 UISettings 打开 DialoguePanel
+│   ├── DialoguePanel.cs        # 继承 BasePanel 的对话 UI
+│   └── DialogueInteractable.cs # Trigger + Interact 触发对话
+├── Event/                      # 全局事件（EventCenterBase<GameEventPayload>）
+│   ├── GameEventPayload.cs
+│   ├── GameEventNames.cs       # 如 EnemyKilled
+│   └── GameEventCenter.cs
+├── Quest/                      # 任务（订阅击杀等事件）
+│   ├── QuestTable.cs           # ScriptableObject 任务定义
+│   ├── QuestLocalData.cs       # 进度存档
+│   └── QuestManager.cs         # 完成时 PackageManager 发奖
+└── Weapon/                     # 武器数值装饰者管道
+    ├── WeaponStatSnapshot.cs
+    ├── IWeaponStatisticsPipeline.cs
+    ├── WeaponStatsRoot.cs
+    ├── WeaponStatDecorator.cs
+    ├── DamageMultiplierWeaponDecorator.cs
+    ├── FireIntervalMultiplierWeaponDecorator.cs
+    ├── ProjectileSpeedMultiplierWeaponDecorator.cs
+    ├── ConfiguredWeaponBuffDecorator.cs
+    ├── WeaponBuffTable.cs      # itemId → 乘数与持续时间
+    └── IWeaponStatisticsPipelineProvider.cs  # MonoBehaviour 扩展包一层管道
 ```
+
+**UI 预制体约定**：`Resources/Prefab/Panel/{pathDict 配置的路径}`，例如对话面板 `Dialogue/DialoguePanel`（根物体挂 `DialoguePanel`）。
 
 ---
 
@@ -60,10 +96,9 @@ Assets/Scripts/
 游戏启动
     │
     ├─► SingleMonoBase 单例初始化
-    │       PlayerController / GameManager / MonoManager / UIManager
-    │       PoolBase 派生类：BulletPools、EnemyPool（若场景挂载且先于访问初始化）
-    │       EventCenterBase 派生：BulletEvent（若使用）
-    │       ObjPoolsBase（若场景挂载）
+    │       PlayerController / GameManager / UIManager / UISettings / …
+    │       PoolBase 派生：EnemyPool（若场景挂载）
+    │       GameEventCenter、QuestManager、PackageManager、DialogueSystem（若使用对应玩法）
     │
     ├─► PlayerModel / EnemyBase：Awake 内创建 StateMachine，组件引用就绪
     │
@@ -71,14 +106,20 @@ Assets/Scripts/
     ├─► PlayerModel.Start：SwitchState(Idle)、ExitAim()
     ├─► EnemyBase.Start：SwitchState(Idle)、FindAttackTarget()、生成血条
     │
-    ├─► Enemymanger（可选）：玩家 Tag 停留在触发器内时，按间隔调用
-    │       EnemyPool.Instance.GetObj(enemyPrefab) 生成僵尸，并累计 enemyCount
+    ├─► Enemymanger（可选）：玩家在触发器内时，按间隔 EnemyPool.GetObj 生成僵尸
     │
     └─► 每帧
             PlayerController：读输入 → worldMovement / localMovement → 角色切换
-            MonoManager：Invoke 已注册的各状态 Update
+            MonoManager：Invoke 已注册的状态 Update
             EnemyBase：血条显示计时（未死亡时）
+            PlayerWeapon：可选 Update 递减药水 Buff 剩余时间
 ```
+
+**扩展数据流（与主循环并行）**
+
+- **击杀 → 任务**：`EnemyBase` 死亡 → `GameEventCenter.TriggerEvent(EnemyKilled)` → `QuestManager` 累加 → 完成则 `PackageManager.TryAddItem`。  
+- **对话发奖**：`DialogueSystem` 中 `DialogueItemGrant` → `PackageManager`。  
+- **打开 UI 面板**：`UISettings.OpenPanel(UIConst.xxx)` → 实例化 `BasePanel` 子类并写入 `panelDict`。
 
 ---
 
@@ -86,12 +127,12 @@ Assets/Scripts/
 
 ### 3.1 玩家状态枚举与切换
 
-| 状态       | 类名              | 触发条件 |
-|------------|-------------------|----------|
-| Idle       | PlayerIdelState   | 默认进入；移动输入为 0 时从 Move 切回 |
-| Move       | PlayerMoveState   | 有移动输入 或 非当前控制角色距离 > stoppingDistance |
-| Hover      | PlayerHoverState  | 跳跃输入 或 离地且满足悬空判定 |
-| Aming      | PlayerAmingState  | 瞄准或攻击按下且当前被控制 |
+| 状态   | 类名              | 触发条件 |
+|--------|-------------------|----------|
+| Idle   | PlayerIdelState   | 默认进入；移动输入为 0 时从 Move 切回 |
+| Move   | PlayerMoveState   | 有移动输入或非当前控制角色距离 > stoppingDistance |
+| Hover  | PlayerHoverState  | 跳跃输入或离地且满足悬空判定 |
+| Aming  | PlayerAmingState  | 瞄准或攻击按下且当前被控制 |
 
 ### 3.2 玩家状态流转图
 
@@ -116,12 +157,12 @@ Assets/Scripts/
 
 ### 3.3 玩家逻辑要点
 
-- **输入**：`PlayerController.Update` 从 `MyInputSystem` 读取 Move / Sprint / Attack / Aim / Jump，并计算相对相机的 `worldMovement`、`localMovement`。
-- **当前控制角色**：`PlayerController.currentPlayerModel`；用数字键 1/2 可 `SwitchPlayerModel` 切换，非当前角色用 NavMeshAgent 跟随当前角色。
-- **状态 Update**：通过 `PlayerStateBase.Enter` 向 `MonoManager` 注册 `Update`，在 `MonoManager.Update` 中统一执行。
-- **重力与悬空**：在 `PlayerStateBase.Update` 中根据 `IsGroundNear` 累加 `verticalSpeed`，满足 `IsHover()` 时切到 Hover；Hover 中 `IsGroundNear()` 为真时落地回 Idle。
-- **瞄准**：Aming 状态下 `EnterAim/ExitAim` 切换 Cinemachine 相机优先级与 IK 权重，`UpdateAimTarget` 用屏幕中心射线更新 `aimTarget.position`。
-- **射击**：Aming 下 `attackInput` 时调用 `playerModel.weapon.Fire(aimTarget.position)`，生成子弹与枪口火花；子弹用 Rigidbody 直线飞行。
+- **输入**：`PlayerController.Update` 从 `MyInputSystem` 读取 Move / Sprint / Attack / Aim / Jump 等，并计算相对相机的 `worldMovement`、`localMovement`。
+- **当前控制角色**：`PlayerController.currentPlayerModel`；数字键 1/2 可 `SwitchPlayerModel`。
+- **状态 Update**：`PlayerStateBase` 通过 `MonoManager` 注册，在 `MonoManager.Update` 中统一执行。
+- **重力与悬空**：`PlayerStateBase.Update` 中根据 `IsGroundNear` 累加 `verticalSpeed`；`IsHover()` 时切 Hover，落地回 Idle。
+- **瞄准**：Aming 下 `EnterAim/ExitAim` 切换 Cinemachine 与 IK；`UpdateAimTarget` 更新 `aimTarget.position`。
+- **射击**：Aming 下 `attackInput` 时 `playerModel.weapon.Fire(aimTarget.position)`（见下节武器管道）。
 
 ---
 
@@ -134,23 +175,27 @@ PlayerAmingState.Update
             │
             └─ PlayerWeapon.Fire(aimTarget.position)
                     │
-                    ├─ 间隔检测 bulletInterval
-                    ├─ 计算方向 dirction，Instantiate 子弹 + 枪口火花
-                    └─ 设置 bullet.forward、Spark.forward
+                    ├─ GetCurrentStats()：WeaponStatsRoot + 各层 ConfiguredWeaponBuffDecorator + 可选 IWeaponStatisticsPipelineProvider
+                    ├─ 间隔检测 stats.fireInterval（相对 Time.time）
+                    ├─ Instantiate 子弹 + 枪口火花，设置 forward
+                    └─ bullet.ApplyWeaponStats(stats.damage, stats.projectileSpeed)
                             │
                             ▼
                     PlayerWeaponBullet
-                    ├─ Start：rb.linearVelocity = forward * flyPower，Destroy(lifeTime)
-                    ├─ CheckInltOverlap：生成时 OverlapSphere 检测 Tag "Enemy"，命中则 Hurt + 销毁
-                    └─ Update：CheckCollision 用 Raycast(prevPosition → position) 检测 "Enemy"，命中则 Hurt + 销毁
+                    ├─ Start：rb.linearVelocity = forward * flyPower（与 ApplyWeaponStats 一致），Destroy(lifeTime)
+                    ├─ CheckInltOverlap：OverlapSphere 检测 Tag "Enemy" → Hurt + 销毁
+                    └─ Update：Raycast(prev→curr) 检测 "Enemy" → Hurt + 销毁
                             │
                             ▼
                     EnemyBase.Hurt(bullet)
-                    ├─ 播放 Hit 动画、减速 SlowMoveSpeed
-                    ├─ 生成血液特效
-                    ├─ currentHealth -= bullet.damage，更新血条、healthBarShowTimer
+                    ├─ 播放 Hit、减速、血液特效
+                    ├─ currentHealth -= bullet.damage，更新血条
                     └─ currentHealth <= 0 → SwitchState(Dead)，禁用 NavMeshAgent/Collider，Destroy(healthBar)
+                            │
+                            └─ NotifyEnemyKilledForQuests() → GameEventCenter.TriggerEvent(EnemyKilled)
 ```
+
+**药水**：`WeaponBuffTable` 配置 `itemId` 与乘数；`PlayerWeapon.TryApplyWeaponBuffFromInventory` 会 `PackageManager.TryRemoveItem` 后叠一层 Buff（详见 `WeaponBuffTable.cs` 内持续时间约定）。
 
 ---
 
@@ -158,43 +203,47 @@ PlayerAmingState.Update
 
 ### 5.1 敌人状态枚举
 
-- **Idle** / **Move** / **Attack** / **Dead**
+Idle / Move / Attack / Dead
 
 ### 5.2 僵尸状态切换（ZombieEnemy + 各 State）
 
-- **Start**：先进入 `Idle`，`FindAttackTarget()` 选最近玩家为 `attackTarget`，在 `UIManager.WorldSpaceCanvas` 下生成血条。
-- **ZombieIdleState**：若**不在**攻击距离内 → `SwitchState(Move)`。
-- **ZombieMoveState**：`ChaseAttackTarget()` 设 NavMesh 目标；若**在**攻击距离内 → `SwitchState(Idle)`（当前实现中未切到 Attack）。
-- **ZombieAttackState**：仅播放 Attack 动画（由其他逻辑切入，或预留）。
-- **ZombieDeadState**：播放 Dead 动画，`IsAnimationBreak()` 为真时 `enemyBase.Clear()`（Stop 状态机并 Destroy 自身）。
+- **Start**：进入 Idle，`FindAttackTarget()`，在 `UIManager.WorldSpaceCanvas` 下生成血条。
+- **ZombieIdleState**：不在攻击距离内 → Move。
+- **ZombieMoveState**：追击；在进入攻击距离时切回 Idle（当前逻辑未自动切 Attack，可按需扩展）。
+- **ZombieAttackState**：攻击动画（预留/由其他逻辑切入）。
+- **ZombieDeadState**：播放 Dead；`IsAnimationBreak()` 为真时 **`EnemyPool.Instance.ReleaseObj(zombie)`** 回池（非 `Clear()` 销毁，与池中复用一致）。
 
 ### 5.3 敌人受击与死亡
 
-- **Hurt(bullet)**：见上面「武器与子弹流程」。
-- **血条**：`EnemyHealthBarUI` 在 WorldSpaceCanvas 下，随 `healthBarTransform` 位置更新，面向相机；受伤时显示一段时间 `healthBarShowTime`。
+- **Hurt(bullet)**：见第四节；血条由 `EnemyHealthBarUI` 显示在世界画布下。
+- **任务统计**：血量归零分支内派发全局击杀事件，供 `QuestManager` 使用；`questEnemyTypeId` 与 `QuestDefinition.enemyTypeIdFilter` 对应（0 常表示不区分类型，以表配置为准）。
 
 ---
 
 ## 六、数据与依赖关系
 
-| 单例/核心类       | 职责                         | 被依赖方 |
-|-------------------|------------------------------|----------|
-| GameManager       | 持有 `playerModels[]`         | PlayerController 切换角色；EnemyBase 寻敌 |
-| PlayerController  | 输入、相机、当前角色         | 所有 PlayerStateBase、PlayerModel |
-| MonoManager       | 统一执行状态机 Update        | PlayerStateBase、EnemyStateBase |
-| UIManager         | WorldSpaceCanvas             | EnemyBase 血条父节点 |
-| StateMachine      | 状态缓存、EnterState/LoadState | PlayerModel、EnemyBase |
+| 单例/核心类        | 职责 | 被依赖方 |
+|--------------------|------|----------|
+| GameManager        | `playerModels[]` | PlayerController、EnemyBase 寻敌 |
+| PlayerController   | 输入、相机、当前角色 | 各 PlayerState、PlayerModel |
+| MonoManager        | 统一状态 Update | PlayerStateBase、EnemyStateBase |
+| UIManager          | WorldSpaceCanvas | EnemyBase 血条父节点 |
+| UISettings         | 面板路径、打开/关闭、panelDict | BasePanel、DialogueSystem |
+| PackageManager     | 背包增删、校验 PackageTable | Dialogue、Quest、PlayerWeapon（药水） |
+| GameEventCenter    | 全局事件 EnemyKilled 等 | QuestManager；EnemyBase |
+| QuestManager       | 任务进度、完成发奖 | 需场景挂载 + QuestTable 引用 |
+| DialogueSystem     | 对话流程、可选弹 DialoguePanel | DialoguePanel、DialogueInteractable |
+| StateMachine       | EnterState / LoadState | PlayerModel、EnemyBase |
 
 ---
 
-## 七、流程小结（按“玩一局”的顺序）
+## 七、流程小结（按「玩一局」顺序）
 
-1. **启动**：单例与状态机初始化，玩家默认 Idle，敌人默认 Idle 并寻敌、生成血条。
-2. **输入**：PlayerController 每帧读输入，计算移动方向；可选切换 1/2 号角色。
-3. **玩家状态**：Idle ↔ Move（移动/跟随）、Idle/Move → Hover（跳跃/离地）、任意 → Aming（瞄准/攻击）。
-4. **瞄准与射击**：Aming 下射线更新准心，按下攻击则 Weapon.Fire → 生成子弹，子弹碰撞/Overlap 检测到 "Enemy" 调用 Hurt。
-5. **敌人**：Hurt 扣血、播受击、减速、更新血条；血量≤0 进 Dead，动画结束后 Clear 销毁。
-6. **血条**：敌人生成时挂在 UIManager 的世界画布下，受伤后显示一段时间，死亡时销毁。
-
-以上即为当前项目从框架、玩家、武器到敌人的整体代码总览与运行流程。
+1. **启动**：单例就绪；玩家 Idle；敌人 Idle 并寻敌、生成血条。  
+2. **输入**：PlayerController 读输入、切人。  
+3. **玩家状态**：Idle ↔ Move、Hover、Aming。  
+4. **瞄准与射击**：Aming 下 Fire → **装饰者管道** 得到伤害/间隔/弹速 → 生成子弹并 **ApplyWeaponStats**。  
+5. **敌人**：Hurt 扣血；死亡切 Dead → 动画结束后 **EnemyPool 回收**；同时 **派发击杀事件**（任务用）。  
+6. **血条**：挂世界画布，受伤显示一段时间，死亡时销毁。  
+7. **可选**：对话/UISettings 面板、背包、任务、喝药水改枪——均依赖对应管理器在场景中存在且 SO 配置完整。
 
